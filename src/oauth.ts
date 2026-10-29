@@ -1,6 +1,7 @@
 // Ported from https://github.com/jvortmann/pi-anthropic-console-login (MIT).
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
+import { fetchWithRetry } from "./http.ts"
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
@@ -12,60 +13,6 @@ export const CALLBACK_PORT = 53693
 const CALLBACK_HOST = "127.0.0.1"
 const CALLBACK_PATH = "/callback"
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`
-
-// Retry logic for rate limits
-const DEFAULT_MAX_RETRY_DELAY_MS = 30_000
-
-function getMaxRetryDelayMs(): number {
-  const env = process.env.OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS
-  if (env) {
-    const parsed = parseInt(env, 10)
-    if (!Number.isNaN(parsed) && parsed > 0) return parsed
-  }
-  return DEFAULT_MAX_RETRY_DELAY_MS
-}
-
-function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    const finish = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener("abort", finish)
-      resolve()
-    }
-    const timer = setTimeout(finish, ms)
-    signal?.addEventListener("abort", finish, { once: true })
-  })
-}
-
-async function fetchWithRetry(
-  input: string | Request,
-  init?: RequestInit,
-  retries: number = 3,
-  fetchImpl: typeof fetch = fetch
-): Promise<Response> {
-  for (let i = 0; i < retries; i++) {
-    const res = await fetchImpl(input, init)
-    if ((res.status === 429 || res.status === 529) && i < retries - 1) {
-      const retryAfter = res.headers.get("retry-after")
-      const parsed = retryAfter ? parseInt(retryAfter, 10) : NaN
-      const delay = Number.isNaN(parsed) ? (i + 1) * 2000 : parsed * 1000
-      if (delay > getMaxRetryDelayMs()) {
-        return res
-      }
-      await sleepUnlessAborted(delay, init?.signal)
-      if (init?.signal?.aborted) {
-        return res
-      }
-      continue
-    }
-    return res
-  }
-  return fetchImpl(input, init)
-}
 
 export async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
   const verifier = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")

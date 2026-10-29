@@ -32,6 +32,24 @@ function sleepUnlessAborted(
   })
 }
 
+/** Milliseconds to wait per a Retry-After header (seconds or HTTP-date); undefined if missing or invalid. */
+export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
+  if (!value) return undefined
+  const trimmed = value.trim()
+  if (/^\d+$/.test(trimmed)) return parseInt(trimmed, 10) * 1000
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) return undefined
+  const date = Date.parse(trimmed)
+  if (Number.isNaN(date)) return undefined
+  return Math.max(0, date - now)
+}
+
+export function describeRateLimit(res: Response): string {
+  const ms = parseRetryAfter(res.headers.get("retry-after"))
+  const base = `Anthropic rate limit (HTTP ${res.status}). The limit is organization-wide, so another API key will not help.`
+  if (ms === undefined) return base
+  return `${base} Resets at ${new Date(Date.now() + ms).toISOString()} (retry-after ${Math.ceil(ms / 1000)}s).`
+}
+
 export async function fetchWithRetry(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -42,8 +60,7 @@ export async function fetchWithRetry(
     const res = await fetchImpl(input, init)
     if ((res.status === 429 || res.status === 529) && i < retries - 1) {
       const retryAfter = res.headers.get("retry-after")
-      const parsed = retryAfter ? parseInt(retryAfter, 10) : NaN
-      const delay = Number.isNaN(parsed) ? (i + 1) * 2000 : parsed * 1000
+      const delay = parseRetryAfter(retryAfter) ?? (i + 1) * 2000
       if (delay > getMaxRetryDelayMs()) {
         log("fetch_rate_limited_quota", {
           status: res.status,
