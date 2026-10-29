@@ -16,7 +16,7 @@ const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`
 // Retry logic for rate limits
 const DEFAULT_MAX_RETRY_DELAY_MS = 30_000
 
-function getMaxRetryDelayMs() {
+function getMaxRetryDelayMs(): number {
   const env = process.env.OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS
   if (env) {
     const parsed = parseInt(env, 10)
@@ -25,7 +25,7 @@ function getMaxRetryDelayMs() {
   return DEFAULT_MAX_RETRY_DELAY_MS
 }
 
-function sleepUnlessAborted(ms, signal) {
+function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     if (signal?.aborted) {
       resolve()
@@ -41,7 +41,12 @@ function sleepUnlessAborted(ms, signal) {
   })
 }
 
-async function fetchWithRetry(input, init, retries = 3, fetchImpl = fetch) {
+async function fetchWithRetry(
+  input: string | Request,
+  init?: RequestInit,
+  retries: number = 3,
+  fetchImpl: typeof fetch = fetch
+): Promise<Response> {
   for (let i = 0; i < retries; i++) {
     const res = await fetchImpl(input, init)
     if ((res.status === 429 || res.status === 529) && i < retries - 1) {
@@ -62,14 +67,14 @@ async function fetchWithRetry(input, init, retries = 3, fetchImpl = fetch) {
   return fetchImpl(input, init)
 }
 
-export async function generatePKCE() {
+export async function generatePKCE(): Promise<{ verifier: string; challenge: string }> {
   const verifier = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
   const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))
   const challenge = Buffer.from(hash).toString("base64url")
   return { verifier, challenge }
 }
 
-export function parseAuthorizationInput(input) {
+export function parseAuthorizationInput(input: string): { code?: string; state?: string } {
   const value = input.trim()
   if (!value) return {}
 
@@ -91,7 +96,15 @@ export function parseAuthorizationInput(input) {
   return { code: value }
 }
 
-export function buildAuthorizeUrl({ challenge, state, redirectUri }) {
+export function buildAuthorizeUrl({
+  challenge,
+  state,
+  redirectUri,
+}: {
+  challenge: string
+  state: string
+  redirectUri: string
+}): string {
   const params = new URLSearchParams({
     code: "true",
     client_id: CLIENT_ID,
@@ -105,7 +118,19 @@ export function buildAuthorizeUrl({ challenge, state, redirectUri }) {
   return `${AUTHORIZE_URL}?${params}`
 }
 
-export async function exchangeCode({ code, state, verifier, redirectUri, fetchFn = fetch }) {
+export async function exchangeCode({
+  code,
+  state,
+  verifier,
+  redirectUri,
+  fetchFn = fetch,
+}: {
+  code: string
+  state: string
+  verifier: string
+  redirectUri: string
+  fetchFn?: typeof fetch
+}): Promise<string> {
   const response = await fetchWithRetry(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -124,7 +149,7 @@ export async function exchangeCode({ code, state, verifier, redirectUri, fetchFn
   return access_token
 }
 
-export async function createApiKey(oauthAccessToken, fetchFn = fetch) {
+export async function createApiKey(oauthAccessToken: string, fetchFn: typeof fetch = fetch): Promise<string> {
   const response = await fetchWithRetry(API_KEY_URL, {
     method: "POST",
     headers: { Authorization: `Bearer ${oauthAccessToken}` },
@@ -136,17 +161,22 @@ export async function createApiKey(oauthAccessToken, fetchFn = fetch) {
   return raw_key
 }
 
-const page = (title, color, message) =>
+const page = (title: string, color: string, message: string): string =>
   `<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center"><h2 style="color:${color}">${title}</h2><p>${message}</p></div></body></html>`
 
-function startCallbackServer(expectedState) {
+interface CallbackServerResult {
+  server: ReturnType<typeof createServer>
+  codePromise: Promise<{ code: string; state: string }>
+}
+
+function startCallbackServer(expectedState: string): Promise<CallbackServerResult> {
   return new Promise((resolve, reject) => {
-    let settle
-    const codePromise = new Promise((resolveCode) => {
+    let settle: (value: { code: string; state: string }) => void
+    const codePromise = new Promise<{ code: string; state: string }>((resolveCode) => {
       settle = resolveCode
     })
 
-    const reply = (res, status, html) => {
+    const reply = (res: any, status: number, html: string) => {
       res.writeHead(status, { "Content-Type": "text/html; charset=utf-8" })
       res.end(html)
     }
@@ -171,7 +201,7 @@ function startCallbackServer(expectedState) {
   })
 }
 
-function open(url) {
+function open(url: string): void {
   const [command, args] =
     process.platform === "darwin"
       ? ["open", [url]]
@@ -183,20 +213,27 @@ function open(url) {
   child.unref()
 }
 
-export async function login({ fetchFn = fetch, openUrl = open, log = console.error, timeoutMs = 5 * 60 * 1000 } = {}) {
+export async function login(options?: {
+  fetchFn?: typeof fetch
+  openUrl?: (url: string) => Promise<void> | void
+  log?: (message: string) => void
+  timeoutMs?: number
+}): Promise<string> {
+  const { fetchFn = fetch, openUrl = open, log = console.error, timeoutMs = 5 * 60 * 1000 } = options ?? {}
+  
   const { verifier, challenge } = await generatePKCE()
 
-  const { server, codePromise } = await startCallbackServer(verifier).catch((error) => {
+  const { server, codePromise } = await startCallbackServer(verifier).catch((error: Error) => {
     throw new Error(`Cannot listen on port ${CALLBACK_PORT} for the login callback: ${error.message}`)
   })
 
-  let timer
+  let timer: NodeJS.Timeout | undefined
   try {
     const authUrl = buildAuthorizeUrl({ challenge, state: verifier, redirectUri: REDIRECT_URI })
     log(`Open this URL to sign in to the Anthropic Console:\n${authUrl}`)
     await Promise.resolve(openUrl(authUrl)).catch(() => {})
 
-    const timeout = new Promise((_, reject) => {
+    const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new Error("Timed out waiting for the browser login.")), timeoutMs)
     })
     const { code, state } = await Promise.race([codePromise, timeout])

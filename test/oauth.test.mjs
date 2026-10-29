@@ -9,7 +9,7 @@ import {
   generatePKCE,
   login,
   parseAuthorizationInput,
-} from "../src/oauth.mjs"
+} from "../src/oauth.ts"
 
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
