@@ -1,0 +1,22 @@
+{
+  "name": "opencode-anthropic-console-login",
+  "version": "0.1.0",
+  "description": "OpenCode 2 plugin that adds an Anthropic Console login (API usage billing) to /connect.",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  }
+}
