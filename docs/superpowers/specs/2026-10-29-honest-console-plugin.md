@@ -1,22 +1,48 @@
-# Honest Console plugin — spec
+# Console plugin replacement
 
 ## Goal
-OpenCode 2 plugin: sign in to Anthropic Console via OAuth in `/connect`, use the minted Console API key for
-`anthropic` requests, and behave honestly under rate limits.
+Provide an OpenCode 2 Console OAuth login using organization API billing, as in
+pi-anthropic-console-login. Replace this repository's request implementation.
+The user approved proceeding on 2026-10-29. Keep active OpenCode configuration unchanged.
 
-## Verified facts (@opencode/plugin 2.2.1)
-- OAuth registration: `ctx.integration.transform(e => e.method.update({ integrationID, method: {id, type:"oauth", label}, authorize, refresh?, label? }))`.
-  `authorize(answer) -> {url, instructions, mode:"auto", callback: Promise<Credential.OAuth>} | {mode:"code", callback:(code)=>Promise<Credential.OAuth>}`.
-- `Credential.OAuth = { type:"oauth", methodID, access, refresh, expires:int, metadata?: Record<string,unknown> }`.
-- `ProviderEditor` has no `fetch`. Request customization goes through `ctx.aisdk.hook("sdk", {model, package, options, sdk?})`.
-- `ctx.integration.connection.active(id)` / `.resolve(conn)` return the stored credential.
+## Approach
+Reuse the working PKCE callback flow and OpenCode integration registration.
+Use native session HTTP hooks, as in the current opencode-claude-auth reference.
+Replace the transport and credential coordination rather than introduce a proxy.
+A separate proxy adds a service to operate and is unnecessary for this plugin.
 
-## Decisions
-- The minted Console API key is stored in `credential.metadata.apiKey`; it does not expire. OAuth `access`/`refresh`/`expires` are kept so the key can be re-minted.
-- No API-key rotation: keys from one Console org share one org quota, so a fresh key cannot escape a 429.
-- Rate limits: honour `retry-after` (seconds or HTTP-date) up to `OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` (default 30000); beyond that return the 429 unchanged. One retry layer only.
-- Re-mint the key at most once per request, only on 401, then retry once.
-- Console API requests authenticate with `x-api-key` (the key is an API key); the earlier `Authorization: Bearer` rewrite is removed unless Task 3's check shows otherwise.
+## Request behavior
+- Authenticate HTTPS requests to api.anthropic.com with the minted Console x-api-key.
+- Preserve SDK headers and payloads. Supply the API version only if absent.
+- Prepend the Claude Code identity block to the system prompt, as Pi does, without cache_control
+  (OpenCode already uses all 4 allowed). Add no browser headers.
+- Return model 429/529 responses intact. OpenCode owns model retries so retry layers do not multiply.
+- Never rotate keys on a rate limit. Do not bypass provider quotas or blocks.
+- Reuse a usable API key even after OAuth expiry. Refresh OAuth only when a new key is needed.
+- Share credential updates across concurrent native model requests.
+- A 401 invalidates that key. The next request shares one replacement operation.
+  Return the original 401 rather than replay a consumed model request.
+- Never replay streams or Request bodies. Never overwrite a newly selected connection with stale credentials.
 
-## Non-goals
-Multi-account rotation; changing the OAuth client ID or scopes.
+## Login and packaging
+Keep Console OAuth client, scopes and localhost callback. Preserve existing credential shape.
+OpenCode stores the result of the method `refresh`, called before `expires`. Refresh rotates
+tokens and mints a fresh key, and falls back to the existing key on failure. A key minted after
+a 401 stays in memory only.
+Exchange each single-use authorization code once, matching Pi. Include upstream status,
+Retry-After and request ID in exchange failures. Use bounded Retry-After waits on
+key creation and refresh endpoints only. Logs exclude credentials and bodies.
+Ship the local TypeScript plugin and tests. Require Node 22.18+ for built-in TypeScript support.
+
+## Verification limits
+Tests cover registration, callback login, headers, concurrent credentials and retry behavior.
+A real OpenCode request requires the user to activate and authorize the plugin. No live quota fix is claimed.
+
+## Runtime compatibility correction
+Fresh Pi login succeeds while OpenCode token exchange fails. A localhost differential
+probe showed Node UA node and Bun UA Bun/1.4.4 with differing automatic headers.
+Under Bun, isolate Console OAuth HTTP calls in a Node subprocess using piped JSON input
+and a captured response. Never put credentials in argv or logs. Preserve HTTP errors,
+honor cancellation, cap response size at 1 MiB, and time out at 60 seconds.
+This reproduces Pi's OAuth transport without changing native model requests or identities.
+The remote cause remains unconfirmed until the user completes a fresh login.

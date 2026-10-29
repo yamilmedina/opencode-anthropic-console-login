@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { apiKeyOf, isExpiring, mintKey, refreshCredential, toCredential } from "../src/credentials.ts"
+import { apiKeyOf, mintKey, refreshCredential, renewCredential, toCredential } from "../src/credentials.ts"
 
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
@@ -68,7 +68,7 @@ test("mintKey works on a credential without metadata", async () => {
   assert.equal(apiKeyOf(next), "sk-ant-new")
 })
 
-test("refreshCredential refreshes tokens, re-mints key, preserves methodID", async () => {
+test("refreshCredential refreshes tokens and preserves an existing API key", async () => {
   const calls = []
   const fetchFn = async (url, init) => {
     calls.push({ url, init })
@@ -84,16 +84,16 @@ test("refreshCredential refreshes tokens, re-mints key, preserves methodID", asy
   assert.equal(next.access, "new-access")
   assert.equal(next.refresh, "new-refresh")
   assert.ok(next.expires >= before + 60 * 1000)
-  assert.equal(apiKeyOf(next), "sk-ant-new")
+  assert.equal(apiKeyOf(next), "sk-ant-old")
 
   const body = JSON.parse(calls[0].init.body)
   assert.equal(body.grant_type, "refresh_token")
   assert.equal(body.refresh_token, "old-refresh")
   assert.equal(body.client_id, "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
-  assert.equal(calls[1].init.headers.Authorization, "Bearer new-access")
+  assert.equal(calls.length, 1)
 })
 
-test("refreshCredential rejects with a sign-in-again message on non-2xx", async () => {
+test("revoked refresh grants produce a sign-in-again message", async () => {
   const fetchFn = async () => jsonResponse({ error: "invalid_grant" }, 400)
   await assert.rejects(
     () => refreshCredential(baseCred(), fetchFn),
@@ -104,10 +104,46 @@ test("refreshCredential rejects with a sign-in-again message on non-2xx", async 
   )
 })
 
-test("isExpiring is true within 5 minutes of expires", () => {
-  const cred = { ...baseCred(), expires: 1_000_000 }
-  const five = 5 * 60 * 1000
-  assert.equal(isExpiring(cred, 1_000_000 - five - 1), false)
-  assert.equal(isExpiring(cred, 1_000_000 - five), true)
-  assert.equal(isExpiring(cred, 1_000_000 + 1), true)
+test("temporary refresh failures do not ask the user to sign in again", async () => {
+  await assert.rejects(refreshCredential(baseCred(), async () => jsonResponse({}, 503)), (error) => {
+    assert.match(error.message, /503/)
+    assert.doesNotMatch(error.message, /sign in again/)
+    return true
+  })
+})
+
+test("refresh respects a long Retry-After without rotating the key", async () => {
+  let calls = 0
+  await assert.rejects(refreshCredential(baseCred(), async () => {
+    calls++
+    return new Response("limited", { status: 429, headers: { "retry-after": "3600" } })
+  }), /429/)
+  assert.equal(calls, 1)
+})
+
+const TOKEN = "https://platform.claude.com/v1/oauth/token"
+const tokens = () => jsonResponse({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 60 })
+
+test("renewCredential rotates tokens and mints a fresh key", async () => {
+  const next = await renewCredential(baseCred(), async (url) =>
+    String(url) === TOKEN ? tokens() : jsonResponse({ raw_key: "sk-ant-fresh" }))
+  assert.equal(next.refresh, "new-refresh")
+  assert.equal(apiKeyOf(next), "sk-ant-fresh")
+})
+
+test("renewCredential keeps the existing key when the refresh fails", async () => {
+  const cred = baseCred()
+  assert.equal(await renewCredential(cred, async () => jsonResponse({}, 400)), cred)
+})
+
+test("renewCredential throws when refresh fails and no key exists", async () => {
+  const { metadata, ...noKey } = baseCred()
+  await assert.rejects(renewCredential(noKey, async () => jsonResponse({}, 400)), /sign in again/)
+})
+
+test("renewCredential keeps rotated tokens and the old key when minting fails", async () => {
+  const next = await renewCredential(baseCred(), async (url) =>
+    String(url) === TOKEN ? tokens() : jsonResponse({}, 503))
+  assert.equal(next.refresh, "new-refresh")
+  assert.equal(apiKeyOf(next), "sk-ant-old")
 })

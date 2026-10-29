@@ -1,12 +1,13 @@
+import { oauthFetch } from "./oauth-transport.ts"
 // Ported from https://github.com/jvortmann/pi-anthropic-console-login (MIT).
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
 import { fetchWithRetry } from "./http.ts"
 import type { TokenResponse } from "./credentials.ts"
 
-const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
-const TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+export const TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 const API_KEY_URL = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key"
 const SCOPES = "org:create_api_key user:profile"
 
@@ -71,7 +72,7 @@ export async function exchangeTokens({
   state,
   verifier,
   redirectUri,
-  fetchFn = fetch,
+  fetchFn = oauthFetch,
 }: {
   code: string
   state: string
@@ -79,7 +80,8 @@ export async function exchangeTokens({
   redirectUri: string
   fetchFn?: typeof fetch
 }): Promise<TokenResponse> {
-  const response = await fetchWithRetry(TOKEN_URL, {
+  // Authorization codes are single-use; match Pi by exchanging each code once.
+  const response = await fetchFn(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -90,9 +92,12 @@ export async function exchangeTokens({
       redirect_uri: redirectUri,
       code_verifier: verifier,
     }),
-  }, 3, fetchFn)
-  
-  if (!response.ok) throw new Error(`Token exchange failed: ${await response.text()}`)
+  })
+
+  if (!response.ok) {
+    const details = `HTTP ${response.status}; Retry-After: ${response.headers.get("retry-after") ?? "not provided"}; Request ID: ${response.headers.get("request-id") ?? response.headers.get("x-request-id") ?? "not provided"}`
+    throw new Error(`Token exchange failed: ${await response.text()}\n${details}`)
+  }
   return (await response.json()) as TokenResponse
 }
 
@@ -100,7 +105,7 @@ export async function exchangeCode(args: Parameters<typeof exchangeTokens>[0]): 
   return (await exchangeTokens(args)).access_token
 }
 
-export async function createApiKey(oauthAccessToken: string, fetchFn: typeof fetch = fetch): Promise<string> {
+export async function createApiKey(oauthAccessToken: string, fetchFn: typeof fetch = oauthFetch): Promise<string> {
   const response = await fetchWithRetry(API_KEY_URL, {
     method: "POST",
     headers: { Authorization: `Bearer ${oauthAccessToken}` },
@@ -170,7 +175,7 @@ export async function beginLogin(options?: {
   log?: (message: string) => void
   timeoutMs?: number
 }): Promise<{ url: string; result: Promise<{ tokens: TokenResponse; apiKey: string }> }> {
-  const { fetchFn = fetch, openUrl = open, log = console.error, timeoutMs = 5 * 60 * 1000 } = options ?? {}
+  const { fetchFn = oauthFetch, openUrl = open, log = console.error, timeoutMs = 5 * 60 * 1000 } = options ?? {}
 
   const { verifier, challenge } = await generatePKCE()
 

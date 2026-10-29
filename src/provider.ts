@@ -1,108 +1,101 @@
-/*
- * Hook verification (@opencode/plugin 2.2.1, dist/promise/aisdk.d.ts):
- *   AISDKHooks.sdk = { readonly model: Model.Info; readonly package: string;
- *                      readonly options: Record<string, any>; sdk?: any }
- *   AISDKDomain.hook: ModelHooks<AISDKHooks>, accepts { providerID } to scope the hook.
- * `options` is a mutable record handed to the AI SDK provider factory, so setting
- * `options.fetch` is the supported way to carry a custom fetch. The installed packages are
- * types only, so that the factory honours `fetch` could not be checked at runtime.
- * Persistence: the plugin context exposes only `credential.activate`; there is no API to save a
- * refreshed credential. The refreshed credential is kept in memory for the process, and a failed
- * refresh is reported through `integration.connection.status` ("needs_auth").
- */
+import { oauthFetch } from "./oauth-transport.ts"
 import type { Plugin } from "@opencode/plugin"
-import { apiKeyOf, isExpiring, mintKey, refreshCredential, type OAuthCredential } from "./credentials.ts"
-import { describeRateLimit, fetchWithRetry } from "./http.ts"
-import { log } from "./logger.ts"
+import { apiKeyOf, mintKey, type OAuthCredential } from "./credentials.ts"
 import { buildRequestHeaders } from "./model-config.ts"
+import { withClaudeCodeIdentity } from "./identity.ts"
+import { log } from "./logger.ts"
 import { INTEGRATION_ID, METHOD_ID } from "./index.ts"
 
-function requestHeaders(input: RequestInfo | URL, init: RequestInit | undefined, apiKey: string): Headers {
-  const headers = new Headers(input instanceof Request ? input.headers : undefined)
-  new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
-  headers.delete("authorization")
-  for (const [key, value] of Object.entries(buildRequestHeaders())) headers.set(key, value)
-  headers.set("x-api-key", apiKey)
-  return headers
-}
+type Connection = NonNullable<Awaited<ReturnType<Plugin.Context["integration"]["connection"]["active"]>>>
 
-export function createConsoleFetch(
-  getCredential: () => Promise<OAuthCredential | undefined>,
-  save: (credential: OAuthCredential) => Promise<void>,
-  base: typeof fetch = fetch,
-): typeof fetch {
-  return async (input, init) => {
-    let cred = await getCredential()
-    if (!cred) return base(input, init)
+/** A key minted after the stored one was rejected. OpenCode can only persist keys through the method's refresh. */
+type Replacement = { replaces: string | undefined; key: string }
 
-    // Refresh also re-mints; otherwise mint only when the credential carries no key.
-    if (isExpiring(cred)) {
-      cred = await refreshCredential(cred, base)
-      await save(cred)
-    } else if (!apiKeyOf(cred)) {
-      cred = await mintKey(cred, base)
-      await save(cred)
-    }
+/**
+ * OpenCode 2 refreshes OAuth tokens and stores the result before `resolve` returns (see
+ * `renewCredential`). This hook only sets the key, and mints a replacement after a 401.
+ */
+export async function registerConsoleRequests(
+  ctx: Pick<Plugin.Context, "session" | "integration">,
+  fetchFn: typeof fetch = oauthFetch,
+): Promise<void> {
+  const replacements = new Map<string, Replacement>()
+  const minting = new Map<string, Promise<string>>()
+  const rejected = new Set<string>()
+  const requests = new WeakMap<Request, string>()
 
-    const send = (key: string) =>
-      fetchWithRetry(input, { ...init, headers: requestHeaders(input, init, key) }, 3, base)
-
-    let res = await send(apiKeyOf(cred)!)
-
-    // A stream body cannot be replayed, so it is never retried after a 401.
-    if (res.status === 401 && !(init?.body instanceof ReadableStream)) {
-      cred = await mintKey(cred, base)
-      await save(cred)
-      res = await send(apiKeyOf(cred)!)
-    }
-
-    if (res.status === 429) log("fetch_rate_limited_final", { message: describeRateLimit(res) })
-    return res
-  }
-}
-
-export async function registerConsoleRequests(ctx: Pick<Plugin.Context, "aisdk" | "integration">): Promise<void> {
-  // The store keeps returning the original credential, so remember the refreshed one until the user reconnects.
-  let origin: OAuthCredential | undefined
-  let current: OAuthCredential | undefined
-
-  const getCredential = async () => {
+  async function active(): Promise<{ connection: Connection; credential: OAuthCredential } | undefined> {
     const connection = await ctx.integration.connection.active(INTEGRATION_ID)
-    if (!connection) return undefined
+    if (connection?.type !== "credential") return undefined
     const stored = await ctx.integration.connection.resolve(connection)
     if (stored?.type !== "oauth" || stored.methodID !== METHOD_ID) return undefined
-    if (!origin || origin.access !== stored.access || origin.refresh !== stored.refresh) {
-      origin = stored as OAuthCredential
-      current = origin
-    }
-    return current
-  }
-  const save = async (credential: OAuthCredential) => {
-    current = credential
+    return { connection, credential: stored as OAuthCredential }
   }
 
-  await ctx.aisdk.hook(
-    "sdk",
-    ({ options }) => {
-      const consoleFetch = createConsoleFetch(getCredential, save, options.fetch ?? fetch)
-      options.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        try {
-          return await consoleFetch(input, init)
-        } catch (error) {
-          if (error instanceof Error && error.message.includes("sign in again")) {
-            const connection = await ctx.integration.connection.active(INTEGRATION_ID)
-            if (connection) {
-              await ctx.integration.connection.status({
-                integrationID: INTEGRATION_ID,
-                connection,
-                status: { status: "needs_auth", message: error.message },
-              })
-            }
-          }
-          throw error
-        }
+  function currentKey(id: string, credential: OAuthCredential): string | undefined {
+    const stored = apiKeyOf(credential)
+    const replacement = replacements.get(id)
+    const key = replacement && replacement.replaces === stored ? replacement.key : stored
+    return key && !rejected.has(key) ? key : undefined
+  }
+
+  async function prepare(): Promise<string | undefined> {
+    const found = await active()
+    if (!found) return undefined
+    const { connection, credential } = found
+    let key = currentKey(connection.id, credential)
+    if (!key) {
+      let pending = minting.get(connection.id)
+      if (!pending) {
+        pending = mintKey(credential, fetchFn).then((next) => {
+          const minted = apiKeyOf(next)!
+          replacements.set(connection.id, { replaces: apiKeyOf(credential), key: minted })
+          return minted
+        }).finally(() => minting.delete(connection.id))
+        minting.set(connection.id, pending)
       }
-    },
-    { providerID: INTEGRATION_ID },
-  )
+      key = await pending
+    }
+    // The user may have switched accounts while waiting; never use the old account's key.
+    const latest = await ctx.integration.connection.active(INTEGRATION_ID)
+    return latest?.id === connection.id ? key : prepare()
+  }
+
+  await ctx.session.hook("http.request", async (event) => {
+    if (event.model.providerID !== INTEGRATION_ID || new URL(event.request.url).origin !== "https://api.anthropic.com") return
+    event.request.signal.throwIfAborted()
+    const key = await prepare()
+    event.request.signal.throwIfAborted()
+    if (!key) return
+
+    const headers = new Headers(event.request.headers)
+    headers.delete("authorization")
+    for (const [name, value] of Object.entries(buildRequestHeaders())) {
+      if (!headers.has(name)) headers.set(name, value)
+    }
+    headers.set("x-api-key", key)
+    if (event.request.method === "POST" && new URL(event.request.url).pathname === "/v1/messages" && event.request.body) {
+      const body = withClaudeCodeIdentity(await event.request.clone().text())
+      headers.delete("content-length")
+      event.request = new Request(event.request.url, { method: "POST", headers, body, signal: event.request.signal })
+    } else {
+      event.request = new Request(event.request, { headers })
+    }
+    requests.set(event.request, key)
+  }, { providerID: INTEGRATION_ID })
+
+  await ctx.session.hook("http.response", (event) => {
+    const key = requests.get(event.request)
+    if (!key) return
+    requests.delete(event.request)
+    if (event.response.status === 429 || event.response.status === 529) {
+      log("console_rate_limited", {
+        status: event.response.status,
+        retryAfter: event.response.headers.get("retry-after"),
+        requestId: event.response.headers.get("request-id"),
+      })
+    }
+    // The host owns retries. A 401 rejects this key for the next request without replaying a stream.
+    if (event.response.status === 401) rejected.add(key)
+  }, { providerID: INTEGRATION_ID })
 }

@@ -138,3 +138,28 @@ test("login rejects a callback whose state does not match", async () => {
 test("callback port is fixed so the redirect URI stays registered", () => {
   assert.equal(CALLBACK_PORT, 53693)
 })
+
+test("a rate-limited authorization code is exchanged once, matching Pi", async () => {
+  let calls = 0
+  const fetchFn = async () => {
+    calls++
+    return new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } }), {
+      status: 429, headers: { "retry-after": "0", "request-id": "req-oauth-test" },
+    })
+  }
+  await assert.rejects(exchangeCode({ code: "single-use-code", state: "s", verifier: "v", redirectUri: "u", fetchFn }), /rate_limit_error/)
+  assert.equal(calls, 1)
+})
+
+test("token exchange errors include upstream status, retry delay and request ID", async () => {
+  const fetchFn = async () => new Response(JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limited" } }), {
+    status: 429, headers: { "retry-after": "3600", "request-id": "req-oauth-test" },
+  })
+  await assert.rejects(exchangeCode({ code: "code", state: "s", verifier: "v", redirectUri: "u", fetchFn }), (error) => {
+    assert.match(error.message, /HTTP 429/)
+    assert.match(error.message, /3600/)
+    assert.match(error.message, /req-oauth-test/)
+    assert.doesNotMatch(error.message, /single-use-code|code_verifier/)
+    return true
+  })
+})

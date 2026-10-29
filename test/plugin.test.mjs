@@ -6,7 +6,7 @@ test("registers an OAuth method on the anthropic integration", async () => {
   const updates = []
   const hooks = []
   const ctx = {
-    aisdk: { hook: async (name, cb, opts) => hooks.push({ name, opts }) },
+    session: { hook: async (name, cb, opts) => hooks.push({ name, opts }) },
     integration: {
       transform: async (callback) => callback({ method: { update: (input) => updates.push(input) } }),
     },
@@ -14,7 +14,10 @@ test("registers an OAuth method on the anthropic integration", async () => {
 
   await plugin.setup(ctx)
 
-  assert.deepEqual(hooks, [{ name: "sdk", opts: { providerID: "anthropic" } }])
+  assert.deepEqual(hooks, [
+    { name: "http.request", opts: { providerID: "anthropic" } },
+    { name: "http.response", opts: { providerID: "anthropic" } },
+  ])
 
   assert.equal(plugin.id, "anthropic-console-login")
   assert.equal(updates.length, 1)

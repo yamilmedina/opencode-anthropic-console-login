@@ -1,71 +1,117 @@
 # opencode-anthropic-console-login
 
-An OpenCode 2 plugin that adds **Anthropic Console (API usage billing)** to `/connect` for the built-in `anthropic`
-provider. It signs in with your Console account instead of a claude.ai subscription and needs no API key from an admin.
+An OpenCode 2 plugin that adds **Anthropic Console (API usage billing)** to `/connect`.
+It uses your Console organization account to create an API key through OAuth.
+Usage is billed to that organization, separately from a Claude subscription.
 
-## Use
+## Install
 
-Add the plugin to `opencode.jsonc`:
+Run `npm ci` in this checkout. Add its absolute path to `plugins` in
+`~/.config/opencode/opencode.json` or `opencode.jsonc`:
 
-```jsonc
+```json
 {
   "plugins": ["/absolute/path/to/opencode-anthropic-console-login"]
 }
 ```
 
-Then run `/connect`, pick **Anthropic**, and choose **Anthropic Console (API usage billing)**. Sign in in the browser.
-You only do this once per machine.
+Replace the example path with your checkout's absolute path. Remove `opencode-claude-auth`
+when switching to this plugin, and keep unrelated plugins. Both auth plugins modify
+Anthropic requests, so loading both can cause conflicting authentication.
 
-## How it works
+Restart OpenCode, run `/connect`, select **Anthropic**, and choose
+**Anthropic Console (API usage billing)**. Complete the browser login and select the
+Console connection if a subscription connection was previously active.
 
-1. The plugin registers an OAuth method (`console`) on the `anthropic` integration. `/connect` shows the sign-in URL
-   and waits for the browser to finish (`mode: "auto"`).
-2. `beginLogin` in `src/oauth.ts` starts a callback server on `localhost:53693`, uses PKCE with scope
-   `org:create_api_key user:profile`, and exchanges the code for an OAuth token.
-3. It calls Anthropic's `create_api_key` endpoint with that token. The minted Console API key is stored in the
-   credential's `metadata.apiKey`, next to the OAuth access and refresh tokens.
-4. An AI SDK hook (`src/provider.ts`) wraps `fetch` for the `anthropic` provider. Each request gets `x-api-key` set to
-   the Console key, plus the identity headers, and any `authorization` header is dropped.
-5. When the OAuth token is about to expire, the plugin refreshes it and mints a fresh key. A `401` triggers one
-   re-mint and one retry (not for streaming request bodies, which cannot be replayed).
+Requires OpenCode 2, `@opencode/plugin` 2.2.1 or compatible, and Node 22.18 or newer
+on PATH for OAuth transport and the development commands. Port `53693` must be free during login.
 
-Refreshed or re-minted credentials are kept in memory only, because the plugin API has no call to persist them.
-After a restart OpenCode loads the stored credential again, and the plugin refreshes it again when needed. If the
-refresh fails, the connection is marked `needs_auth`; run `/connect` and sign in again.
+## OAuth runtime
 
-## Rate limiting
+When loaded in OpenCode's Bun runtime, the plugin runs Console OAuth requests through
+Node's fetch and TLS stack, matching Pi's runtime. This applies to code exchange, token
+refresh, and key creation. Model requests remain on OpenCode's native transport.
 
-Requests answered with `429` or `529` are retried according to `retry-after` (seconds or an HTTP date), up to
-`OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` (default 30000 ms). If the server asks for a longer wait, the response is returned
-unchanged so the error surfaces instead of the session hanging.
+Codes, tokens, and request bodies reach the Node process through a private stdin pipe.
+They are never passed as command-line arguments. OAuth transport has a 60-second timeout
+and returns server errors unchanged. A `429` can still occur and includes diagnostic headers.
 
-Keys from one organization share a single quota. Retrying, or minting a new key, cannot get around an
-organization-wide limit; the plugin only waits out short limits.
+## Request handling
 
-```bash
-export OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS=60000  # 60 seconds
+The plugin uses OpenCode 2's native session HTTP hooks for the Anthropic provider.
+It sets `x-api-key` on HTTPS requests to `api.anthropic.com` and removes the OAuth
+`authorization` header. Other providers, endpoints, and authentication methods pass
+through unchanged.
+
+Like Pi's Console provider, the plugin prepends the Claude Code identity block
+(`You are Claude Code, Anthropic's official CLI for Claude.`) to the system prompt of
+`/v1/messages` requests. SDK headers, tool names, and streaming responses are preserved.
+The plugin supplies an API version and user agent only when absent. It adds no session
+or browser-access headers.
+
+## Credentials and refresh
+
+The Console login stores an OAuth access token, a refresh token, and an API key (in
+`metadata.apiKey`). Console tokens last 8 hours. About 5 minutes before expiry, OpenCode
+calls the plugin's `refresh` on the next model request and stores the result. The plugin
+rotates the tokens and creates a fresh API key. Anthropic retires the old refresh token,
+so this stored result is what keeps you signed in.
+
+If a refresh fails, the existing key stays in use. Sign in through `/connect` again only
+if requests start failing with authentication errors. If key creation alone fails, the
+rotated tokens are still stored.
+
+Model requests use the stored key. A `401` marks that key as rejected. The next request
+creates a replacement from the stored access token, shared across concurrent requests.
+This replacement lives in memory only, because OpenCode persists credentials only through
+`refresh`. After a restart the stored key is tried again and replaced again if needed.
+The original `401` is returned without replaying a consumed request body.
+
+## Rate limits
+
+OpenCode handles retries for model requests. The plugin returns `429` and `529` responses
+with their bodies and headers unchanged, including `retry-after`. It adds no second retry
+loop and never creates a new key in response to a rate limit.
+
+Each authorization code is exchanged once, matching Pi. A failed token exchange includes
+the HTTP status, `Retry-After`, and request ID when supplied by the server. Wait for the
+server-requested delay before starting a fresh login; model headers cannot fix this login error.
+
+API-key creation and OAuth refresh use at most three attempts for `429` and `529`, respecting
+`retry-after` in seconds or as an HTTP date. If the requested wait exceeds
+`CONSOLE_LOGIN_MAX_RETRY_MS`, which defaults to 30000, the operation returns the
+error immediately. Cancellation stops these retry waits.
+
+This plugin cannot increase your organization's quota. A real quota limit can still
+produce OpenCode's retry countdown.
+
+## Diagnose a rate limit
+
+Start OpenCode with `CONSOLE_LOGIN_DEBUG` set to an absolute file path:
+
+```sh
+CONSOLE_LOGIN_DEBUG=/tmp/console-login-debug.jsonl opencode
 ```
 
-## Known limitation
-
-The hook sets `options.fetch` on the AI SDK provider options. That this is honoured is based on the type definitions
-of `@opencode/plugin` 2.2.1 and has not been confirmed against a running OpenCode.
-
-## Notes
-
-- Port `53693` must be free during login.
-- The sign-in uses Claude Code's OAuth client ID, so the Console consent screen looks like Claude Code's.
-- Each `/connect` login saves a new account. Remove old ones with `/connect` or `opencode auth`; don't edit the database.
-- Needs Node 20 or newer.
+For model rate limits, the log records the status, `retry-after`, and Anthropic request ID.
+It excludes API keys, OAuth tokens, prompts, and response bodies. Share those diagnostics
+when reporting a failure.
 
 ## Develop
 
 ```sh
-npm install
+npm ci
 npm test
+npm pack --dry-run
 ```
+
+Tests cover OAuth callbacks, native hook registration, request headers, concurrent key
+creation, connection changes, cancellation, and rate-limit handling. A live request in
+OpenCode still requires you to activate and authorize the plugin.
 
 ## Credits
 
-The OAuth flow is ported from [jvortmann/pi-anthropic-console-login](https://github.com/jvortmann/pi-anthropic-console-login)
-(MIT).
+The OAuth flow is ported from
+[jvortmann/pi-anthropic-console-login](https://github.com/jvortmann/pi-anthropic-console-login),
+under the MIT license. The native HTTP hook approach follows
+[griffinmartin/opencode-claude-auth](https://github.com/griffinmartin/opencode-claude-auth).

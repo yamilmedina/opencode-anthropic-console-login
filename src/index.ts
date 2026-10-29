@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin"
-import { refreshCredential, apiKeyOf, toCredential } from "./credentials.ts"
+import { renewCredential, apiKeyOf, toCredential } from "./credentials.ts"
 import { beginLogin } from "./oauth.ts"
 import { registerConsoleRequests } from "./provider.ts"
 
@@ -23,7 +23,7 @@ export default Plugin.define({
             callback: result.then(({ tokens, apiKey }) => toCredential(tokens, METHOD_ID, apiKey)),
           }
         },
-        refresh: (credential) => refreshCredential(credential),
+        refresh: (credential) => renewCredential(credential),
         label(credential) {
           const key = apiKeyOf(credential)
           return key ? `Console key …${key.slice(-4)}` : undefined

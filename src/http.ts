@@ -1,3 +1,4 @@
+import { setTimeout as pause } from "node:timers/promises"
 import { log } from "./logger.ts"
 
 export type FetchFn = typeof fetch
@@ -5,31 +6,12 @@ export type FetchFn = typeof fetch
 const DEFAULT_MAX_RETRY_DELAY_MS = 30_000
 
 function getMaxRetryDelayMs(): number {
-  const env = process.env.OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS
+  const env = process.env.CONSOLE_LOGIN_MAX_RETRY_MS
   if (env) {
     const parsed = parseInt(env, 10)
     if (!Number.isNaN(parsed) && parsed > 0) return parsed
   }
   return DEFAULT_MAX_RETRY_DELAY_MS
-}
-
-function sleepUnlessAborted(
-  ms: number,
-  signal?: AbortSignal | null,
-): Promise<void> {
-  return new Promise((resolve) => {
-    if (signal?.aborted) {
-      resolve()
-      return
-    }
-    const finish = () => {
-      clearTimeout(timer)
-      signal?.removeEventListener("abort", finish)
-      resolve()
-    }
-    const timer = setTimeout(finish, ms)
-    signal?.addEventListener("abort", finish, { once: true })
-  })
 }
 
 /** Milliseconds to wait per a Retry-After header (seconds or HTTP-date); undefined if missing or invalid. */
@@ -43,20 +25,15 @@ export function parseRetryAfter(value: string | null, now = Date.now()): number 
   return Math.max(0, date - now)
 }
 
-export function describeRateLimit(res: Response): string {
-  const ms = parseRetryAfter(res.headers.get("retry-after"))
-  const base = `Anthropic rate limit (HTTP ${res.status}). The limit is organization-wide, so another API key will not help.`
-  if (ms === undefined) return base
-  return `${base} Resets at ${new Date(Date.now() + ms).toISOString()} (retry-after ${Math.ceil(ms / 1000)}s).`
-}
-
 export async function fetchWithRetry(
   input: RequestInfo | URL,
   init?: RequestInit,
   retries = 3,
   fetchImpl: FetchFn = fetch,
 ): Promise<Response> {
-  for (let i = 0; i < retries; i++) {
+  const signal = init?.signal ?? undefined
+  for (let i = 0; i < Math.max(1, retries); i++) {
+    signal?.throwIfAborted()
     const res = await fetchImpl(input, init)
     if ((res.status === 429 || res.status === 529) && i < retries - 1) {
       const retryAfter = res.headers.get("retry-after")
@@ -75,11 +52,8 @@ export async function fetchWithRetry(
         retryAfter: retryAfter ?? "none",
         delayMs: delay,
       })
-      await sleepUnlessAborted(delay, init?.signal)
-      if (init?.signal?.aborted) {
-        log("fetch_retry_aborted", { status: res.status })
-        return res
-      }
+      await res.body?.cancel()
+      await pause(delay, undefined, { signal })
       continue
     }
     return res
