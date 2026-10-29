@@ -1,155 +1,113 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import {
-  getOrCreateApiKey,
-  isOAuthTokenExpired,
-  refreshOAuthToken,
-  validateCredentialFormat,
-} from "../src/credentials.ts"
+import { apiKeyOf, isExpiring, mintKey, refreshCredential, toCredential } from "../src/credentials.ts"
 
 const jsonResponse = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } })
 
-test("getOrCreateApiKey creates new key if none cached", async () => {
-  const credential = { accessToken: "oauth-token" }
+const baseCred = () => ({
+  type: "oauth",
+  methodID: "console",
+  access: "old-access",
+  refresh: "old-refresh",
+  expires: 1000,
+  metadata: { apiKey: "sk-ant-old", other: "keep" },
+})
+
+test("toCredential builds an OAuth credential with the key in metadata", () => {
+  const cred = toCredential(
+    { access_token: "a", refresh_token: "r", expires_in: 100 },
+    "console",
+    "sk-ant-1",
+    5000,
+  )
+  assert.deepEqual(cred, {
+    type: "oauth",
+    methodID: "console",
+    access: "a",
+    refresh: "r",
+    expires: 5000 + 100 * 1000,
+    metadata: { apiKey: "sk-ant-1" },
+  })
+})
+
+test("toCredential defaults expires_in to 3600 seconds", () => {
+  const cred = toCredential({ access_token: "a", refresh_token: "r" }, "console", "k", 0)
+  assert.equal(cred.expires, 3600 * 1000)
+})
+
+test("apiKeyOf returns the stored key, undefined without metadata", () => {
+  assert.equal(apiKeyOf(baseCred()), "sk-ant-old")
+  const { metadata, ...noMeta } = baseCred()
+  assert.equal(apiKeyOf(noMeta), undefined)
+  assert.equal(apiKeyOf({ ...noMeta, metadata: {} }), undefined)
+  assert.equal(apiKeyOf({ ...noMeta, metadata: { apiKey: "" } }), undefined)
+  assert.equal(apiKeyOf({ ...noMeta, metadata: { apiKey: 5 } }), undefined)
+})
+
+test("mintKey returns a copy with a new key and does not mutate the input", async () => {
+  const cred = baseCred()
   const calls = []
   const fetchFn = async (url, init) => {
     calls.push({ url, init })
-    return jsonResponse({ raw_key: "sk-ant-new-key-1" })
+    return jsonResponse({ raw_key: "sk-ant-new" })
   }
-  
-  const key = await getOrCreateApiKey(credential, fetchFn)
-  
-  assert.equal(key, "sk-ant-new-key-1")
-  assert.equal(credential._cachedApiKey, "sk-ant-new-key-1")
-  assert.ok(credential._lastApiKeyCreatedAt)
+  const next = await mintKey(cred, fetchFn)
+  assert.equal(apiKeyOf(next), "sk-ant-new")
+  assert.equal(next.metadata.other, "keep")
+  assert.equal(next.access, "old-access")
+  assert.notEqual(next, cred)
+  assert.equal(cred.metadata.apiKey, "sk-ant-old")
   assert.equal(calls.length, 1)
-  assert.equal(calls[0].url, "https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
+  assert.equal(calls[0].init.headers.Authorization, "Bearer old-access")
 })
 
-test("getOrCreateApiKey reuses key within 1 hour", async () => {
-  const now = Date.now()
-  const credential = {
-    accessToken: "oauth-token",
-    _cachedApiKey: "sk-ant-cached-key",
-    _lastApiKeyCreatedAt: now - 30 * 60 * 1000, // 30 minutes ago
-  }
-  const fetchFn = async () => {
-    throw new Error("Should not call createApiKey")
-  }
-  
-  const key = await getOrCreateApiKey(credential, fetchFn)
-  
-  assert.equal(key, "sk-ant-cached-key")
+test("mintKey works on a credential without metadata", async () => {
+  const { metadata, ...noMeta } = baseCred()
+  const next = await mintKey(noMeta, async () => jsonResponse({ raw_key: "sk-ant-new" }))
+  assert.equal(apiKeyOf(next), "sk-ant-new")
 })
 
-test("getOrCreateApiKey creates new key after 1 hour expires", async () => {
-  const now = Date.now()
-  const credential = {
-    accessToken: "oauth-token",
-    _cachedApiKey: "sk-ant-old-key",
-    _lastApiKeyCreatedAt: now - 61 * 60 * 1000, // 61 minutes ago
-  }
+test("refreshCredential refreshes tokens, re-mints key, preserves methodID", async () => {
   const calls = []
   const fetchFn = async (url, init) => {
     calls.push({ url, init })
-    return jsonResponse({ raw_key: "sk-ant-new-key-2" })
+    if (String(url) === "https://platform.claude.com/v1/oauth/token") {
+      return jsonResponse({ access_token: "new-access", refresh_token: "new-refresh", expires_in: 60 })
+    }
+    return jsonResponse({ raw_key: "sk-ant-new" })
   }
-  
-  const key = await getOrCreateApiKey(credential, fetchFn)
-  
-  assert.equal(key, "sk-ant-new-key-2")
-  assert.equal(credential._cachedApiKey, "sk-ant-new-key-2")
-  assert.ok(credential._lastApiKeyCreatedAt > now - 61 * 60 * 1000)
-  assert.equal(calls.length, 1)
-})
+  const before = Date.now()
+  const next = await refreshCredential(baseCred(), fetchFn)
+  assert.equal(next.methodID, "console")
+  assert.equal(next.type, "oauth")
+  assert.equal(next.access, "new-access")
+  assert.equal(next.refresh, "new-refresh")
+  assert.ok(next.expires >= before + 60 * 1000)
+  assert.equal(apiKeyOf(next), "sk-ant-new")
 
-test("isOAuthTokenExpired returns false initially, true after 95% of lifetime", () => {
-  const now = Date.now()
-  
-  // Token with 1 hour lifetime, created just now
-  const fresh = {
-    accessToken: "token",
-    oauthTokenCreatedAt: now,
-    expiresAt: now + 3600 * 1000,
-  }
-  assert.equal(isOAuthTokenExpired(fresh), false)
-  
-  // Token at exactly 95% of lifetime consumed
-  const almostExpired = {
-    accessToken: "token",
-    oauthTokenCreatedAt: now - 3420 * 1000, // 95% of 3600 seconds
-    expiresAt: now + 180 * 1000, // 5% remaining
-  }
-  assert.equal(isOAuthTokenExpired(almostExpired), true)
-  
-  // Token at 94% of lifetime consumed (not expired yet)
-  const almostFresh = {
-    accessToken: "token",
-    oauthTokenCreatedAt: now - 3384 * 1000, // 94% of 3600 seconds
-    expiresAt: now + 216 * 1000, // 6% remaining
-  }
-  assert.equal(isOAuthTokenExpired(almostFresh), false)
-  
-  // Token with no expiry info
-  const noExpiry = {
-    accessToken: "token",
-  }
-  assert.equal(isOAuthTokenExpired(noExpiry), false)
-})
-
-test("refreshOAuthToken exchanges refresh token for new access token", async () => {
-  const calls = []
-  const fetchFn = async (url, init) => {
-    calls.push({ url, init })
-    return jsonResponse({
-      access_token: "new-oauth-token",
-      refresh_token: "new-refresh-token",
-      expires_in: 3600,
-    })
-  }
-  
-  const refreshToken = "old-refresh-token"
-  const credential = await refreshOAuthToken(refreshToken, fetchFn)
-  
-  assert.equal(credential.accessToken, "new-oauth-token")
-  assert.equal(credential.refreshToken, "new-refresh-token")
-  assert.ok(credential.expiresAt)
-  assert.ok(credential.oauthTokenCreatedAt)
-  assert.equal(calls.length, 1)
-  assert.equal(calls[0].url, "https://platform.claude.com/v1/oauth/token")
-  assert.equal(calls[0].init.method, "POST")
-  
   const body = JSON.parse(calls[0].init.body)
   assert.equal(body.grant_type, "refresh_token")
-  assert.equal(body.refresh_token, "old-refresh-token")
+  assert.equal(body.refresh_token, "old-refresh")
   assert.equal(body.client_id, "9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+  assert.equal(calls[1].init.headers.Authorization, "Bearer new-access")
 })
 
-test("validateCredentialFormat accepts valid credential, rejects invalid ones", () => {
-  // Valid credential
-  const valid = { accessToken: "token" }
-  assert.deepEqual(validateCredentialFormat(valid), valid)
-  
-  // Valid credential with optional fields
-  const validFull = {
-    accessToken: "token",
-    refreshToken: "refresh",
-    expiresAt: 12345,
-    oauthTokenCreatedAt: 12345,
-    _cachedApiKey: "key",
-    _lastApiKeyCreatedAt: 12345,
-  }
-  assert.deepEqual(validateCredentialFormat(validFull), validFull)
-  
-  // Missing accessToken
-  assert.equal(validateCredentialFormat({ refreshToken: "r" }), null)
-  
-  // accessToken is not a string
-  assert.equal(validateCredentialFormat({ accessToken: 123 }), null)
-  
-  // Not an object
-  assert.equal(validateCredentialFormat("not-an-object"), null)
-  assert.equal(validateCredentialFormat(null), null)
-  assert.equal(validateCredentialFormat(undefined), null)
+test("refreshCredential rejects with a sign-in-again message on non-2xx", async () => {
+  const fetchFn = async () => jsonResponse({ error: "invalid_grant" }, 400)
+  await assert.rejects(
+    () => refreshCredential(baseCred(), fetchFn),
+    (err) => {
+      assert.equal(err.message, "Console session expired; run /connect and sign in again")
+      return true
+    },
+  )
+})
+
+test("isExpiring is true within 5 minutes of expires", () => {
+  const cred = { ...baseCred(), expires: 1_000_000 }
+  const five = 5 * 60 * 1000
+  assert.equal(isExpiring(cred, 1_000_000 - five - 1), false)
+  assert.equal(isExpiring(cred, 1_000_000 - five), true)
+  assert.equal(isExpiring(cred, 1_000_000 + 1), true)
 })

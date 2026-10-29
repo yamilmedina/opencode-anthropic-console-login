@@ -2,110 +2,72 @@ import { createApiKey } from "./oauth.ts"
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+const EXPIRY_MARGIN_MS = 5 * 60 * 1000
 
-export interface OAuthCredential {
-  accessToken: string
-  refreshToken?: string
-  expiresAt?: number
-  oauthTokenCreatedAt?: number
-  _cachedApiKey?: string
-  _lastApiKeyCreatedAt?: number
+export type OAuthCredential = {
+  type: "oauth"
+  methodID: string
+  access: string
+  refresh: string
+  expires: number
+  metadata?: Record<string, unknown>
 }
 
-/**
- * Check if an OAuth token has consumed 95% or more of its lifetime.
- * Returns false if no expiry information is available.
- */
-export function isOAuthTokenExpired(credential: OAuthCredential): boolean {
-  if (!credential.expiresAt || !credential.oauthTokenCreatedAt) {
-    return false
+export type TokenResponse = { access_token: string; refresh_token: string; expires_in?: number }
+
+export function toCredential(
+  tokens: TokenResponse,
+  methodID: string,
+  apiKey: string,
+  now: number = Date.now(),
+): OAuthCredential {
+  return {
+    type: "oauth",
+    methodID,
+    access: tokens.access_token,
+    refresh: tokens.refresh_token,
+    expires: now + (tokens.expires_in ?? 3600) * 1000,
+    metadata: { apiKey },
   }
-  
-  const totalLifetime = credential.expiresAt - credential.oauthTokenCreatedAt
-  const elapsed = Date.now() - credential.oauthTokenCreatedAt
-  const percentConsumed = elapsed / totalLifetime
-  
-  return percentConsumed >= 0.95
 }
 
-/**
- * Get or create an API key. Reuses cached key if less than 1 hour old,
- * otherwise creates a new one.
- */
-export async function getOrCreateApiKey(
-  credential: OAuthCredential,
-  fetchFn: typeof fetch = fetch
-): Promise<string> {
-  const now = Date.now()
-  const ONE_HOUR_MS = 60 * 60 * 1000
-  
-  // Reuse cached key if it exists and is less than 1 hour old
-  if (
-    credential._cachedApiKey &&
-    credential._lastApiKeyCreatedAt &&
-    now - credential._lastApiKeyCreatedAt < ONE_HOUR_MS
-  ) {
-    return credential._cachedApiKey
-  }
-  
-  // Create a new API key
-  const newKey = await createApiKey(credential.accessToken, fetchFn)
-  
-  // Cache it
-  credential._cachedApiKey = newKey
-  credential._lastApiKeyCreatedAt = now
-  
-  return newKey
+export function apiKeyOf(cred: OAuthCredential): string | undefined {
+  const key = cred.metadata?.apiKey
+  return typeof key === "string" && key !== "" ? key : undefined
 }
 
-/**
- * Refresh an OAuth token using a refresh token.
- * Returns a new OAuthCredential with the new access token and expiry information.
- */
-export async function refreshOAuthToken(
-  refreshToken: string,
-  fetchFn: typeof fetch = fetch
+export async function mintKey(cred: OAuthCredential, fetchFn: typeof fetch = fetch): Promise<OAuthCredential> {
+  const apiKey = await createApiKey(cred.access, fetchFn)
+  return { ...cred, metadata: { ...cred.metadata, apiKey } }
+}
+
+export async function refreshCredential(
+  cred: OAuthCredential,
+  fetchFn: typeof fetch = fetch,
 ): Promise<OAuthCredential> {
   const response = await fetchFn(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       grant_type: "refresh_token",
-      refresh_token: refreshToken,
+      refresh_token: cred.refresh,
       client_id: CLIENT_ID,
     }),
   })
-  
-  if (!response.ok) {
-    throw new Error(`Token refresh failed: ${await response.text()}`)
-  }
-  
-  const data = await response.json()
-  const now = Date.now()
-  const expiresInSeconds = data.expires_in ?? 3600
-  
-  return {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt: now + expiresInSeconds * 1000,
-    oauthTokenCreatedAt: now,
-  }
+  if (!response.ok) throw new Error("Console session expired; run /connect and sign in again")
+
+  const tokens = (await response.json()) as TokenResponse
+  return mintKey(
+    {
+      ...cred,
+      access: tokens.access_token,
+      refresh: tokens.refresh_token ?? cred.refresh,
+      expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    },
+    fetchFn,
+  )
 }
 
-/**
- * Validate that a value is a valid OAuthCredential.
- * Returns the credential if valid, null otherwise.
- */
-export function validateCredentialFormat(value: unknown): OAuthCredential | null {
-  if (!value || typeof value !== "object") {
-    return null
-  }
-  
-  const obj = value as Record<string, unknown>
-  
-  if (typeof obj.accessToken !== "string") {
-    return null
-  }
-  
-  return value as OAuthCredential
+export function isExpiring(cred: OAuthCredential, now: number = Date.now()): boolean {
+  return now >= cred.expires - EXPIRY_MARGIN_MS
 }
