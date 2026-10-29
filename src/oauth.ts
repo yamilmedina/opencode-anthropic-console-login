@@ -2,6 +2,7 @@
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
 import { fetchWithRetry } from "./http.ts"
+import type { TokenResponse } from "./credentials.ts"
 
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 const AUTHORIZE_URL = "https://platform.claude.com/oauth/authorize"
@@ -65,7 +66,7 @@ export function buildAuthorizeUrl({
   return `${AUTHORIZE_URL}?${params}`
 }
 
-export async function exchangeCode({
+export async function exchangeTokens({
   code,
   state,
   verifier,
@@ -77,7 +78,7 @@ export async function exchangeCode({
   verifier: string
   redirectUri: string
   fetchFn?: typeof fetch
-}): Promise<string> {
+}): Promise<TokenResponse> {
   const response = await fetchWithRetry(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -92,8 +93,11 @@ export async function exchangeCode({
   }, 3, fetchFn)
   
   if (!response.ok) throw new Error(`Token exchange failed: ${await response.text()}`)
-  const { access_token } = await response.json()
-  return access_token
+  return (await response.json()) as TokenResponse
+}
+
+export async function exchangeCode(args: Parameters<typeof exchangeTokens>[0]): Promise<string> {
+  return (await exchangeTokens(args)).access_token
 }
 
 export async function createApiKey(oauthAccessToken: string, fetchFn: typeof fetch = fetch): Promise<string> {
@@ -160,36 +164,43 @@ function open(url: string): void {
   child.unref()
 }
 
-export async function login(options?: {
+export async function beginLogin(options?: {
   fetchFn?: typeof fetch
   openUrl?: (url: string) => Promise<void> | void
   log?: (message: string) => void
   timeoutMs?: number
-}): Promise<string> {
+}): Promise<{ url: string; result: Promise<{ tokens: TokenResponse; apiKey: string }> }> {
   const { fetchFn = fetch, openUrl = open, log = console.error, timeoutMs = 5 * 60 * 1000 } = options ?? {}
-  
+
   const { verifier, challenge } = await generatePKCE()
 
   const { server, codePromise } = await startCallbackServer(verifier).catch((error: Error) => {
     throw new Error(`Cannot listen on port ${CALLBACK_PORT} for the login callback: ${error.message}`)
   })
 
+  const url = buildAuthorizeUrl({ challenge, state: verifier, redirectUri: REDIRECT_URI })
+  log(`Open this URL to sign in to the Anthropic Console:\n${url}`)
+
   let timer: NodeJS.Timeout | undefined
-  try {
-    const authUrl = buildAuthorizeUrl({ challenge, state: verifier, redirectUri: REDIRECT_URI })
-    log(`Open this URL to sign in to the Anthropic Console:\n${authUrl}`)
-    await Promise.resolve(openUrl(authUrl)).catch(() => {})
+  const result = (async () => {
+    try {
+      await Promise.resolve(openUrl(url)).catch(() => {})
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Timed out waiting for the browser login.")), timeoutMs)
+      })
+      const { code, state } = await Promise.race([codePromise, timeout])
+      const tokens = await exchangeTokens({ code, state, verifier, redirectUri: REDIRECT_URI, fetchFn })
+      return { tokens, apiKey: await createApiKey(tokens.access_token, fetchFn) }
+    } finally {
+      clearTimeout(timer)
+      server.close()
+      server.closeAllConnections()
+    }
+  })()
+  return { url, result }
+}
 
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Timed out waiting for the browser login.")), timeoutMs)
-    })
-    const { code, state } = await Promise.race([codePromise, timeout])
-
-    const oauthAccess = await exchangeCode({ code, state, verifier, redirectUri: REDIRECT_URI, fetchFn })
-    return await createApiKey(oauthAccess, fetchFn)
-  } finally {
-    clearTimeout(timer)
-    server.close()
-    server.closeAllConnections()
-  }
+export async function login(options?: Parameters<typeof beginLogin>[0]): Promise<string> {
+  const { result } = await beginLogin(options)
+  return (await result).apiKey
 }

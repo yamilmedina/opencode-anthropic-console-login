@@ -1,43 +1,33 @@
-import { fileURLToPath } from "node:url"
-import { Plugin, Provider } from "@opencode/plugin"
-import { fetchWithRetry } from "./http.ts"
+import { Plugin } from "@opencode/plugin"
+import { refreshCredential, apiKeyOf, toCredential } from "./credentials.ts"
+import { beginLogin } from "./oauth.ts"
 
 export const INTEGRATION_ID = "anthropic"
 export const METHOD_ID = "console"
 
-const PROVIDER_ID = Provider.ID.make("anthropic")
-
 export default Plugin.define({
   id: "anthropic-console-login",
   async setup(ctx) {
-    const script = fileURLToPath(new URL("./login.mjs", import.meta.url))
-    
-    // Register the command auth method
     await ctx.integration.transform((editor) => {
       editor.method.update({
         integrationID: INTEGRATION_ID,
-        method: {
-          id: METHOD_ID,
-          type: "command",
-          label: "Anthropic Console (API usage billing)",
-          command: ["node", script],
+        method: { id: METHOD_ID, type: "oauth", label: "Anthropic Console (API usage billing)" },
+        async authorize() {
+          // OpenCode shows the URL; the callback server on the fixed port completes the flow.
+          const { url, result } = await beginLogin({ openUrl: () => {}, log: () => {} })
+          return {
+            mode: "auto",
+            url,
+            instructions: "Sign in to the Anthropic Console in your browser.",
+            callback: result.then(({ tokens, apiKey }) => toCredential(tokens, METHOD_ID, apiKey)),
+          }
+        },
+        refresh: (credential) => refreshCredential(credential),
+        label(credential) {
+          const key = apiKeyOf(credential)
+          return key ? `Console key …${key.slice(-4)}` : undefined
         },
       })
     })
-
-    // Wrap the Anthropic provider to add retry logic for Console API keys
-    if (ctx.provider) {
-      await ctx.provider.transform(async (editor) => {
-        if (editor.id !== PROVIDER_ID) return
-
-        const originalFetch = editor.fetch
-        if (!originalFetch) return
-
-        // Wrap fetch with retry logic
-        editor.fetch = async (input, init) => {
-          return fetchWithRetry(input, init, 3, originalFetch)
-        }
-      })
-    }
   },
 })
