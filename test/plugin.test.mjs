@@ -4,13 +4,17 @@ import plugin from "../src/index.ts"
 
 test("registers an OAuth method on the anthropic integration", async () => {
   const updates = []
+  const hooks = []
   const ctx = {
+    aisdk: { hook: async (name, cb, opts) => hooks.push({ name, opts }) },
     integration: {
       transform: async (callback) => callback({ method: { update: (input) => updates.push(input) } }),
     },
   }
 
   await plugin.setup(ctx)
+
+  assert.deepEqual(hooks, [{ name: "sdk", opts: { providerID: "anthropic" } }])
 
   assert.equal(plugin.id, "anthropic-console-login")
   assert.equal(updates.length, 1)

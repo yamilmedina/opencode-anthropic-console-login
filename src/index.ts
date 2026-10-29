@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin"
 import { refreshCredential, apiKeyOf, toCredential } from "./credentials.ts"
 import { beginLogin } from "./oauth.ts"
+import { registerConsoleRequests } from "./provider.ts"
 
 export const INTEGRATION_ID = "anthropic"
 export const METHOD_ID = "console"
@@ -29,5 +30,6 @@ export default Plugin.define({
         },
       })
     })
+    await registerConsoleRequests(ctx)
   },
 })
