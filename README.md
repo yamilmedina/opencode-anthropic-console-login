@@ -18,36 +18,45 @@ You only do this once per machine.
 
 ## How it works
 
-1. The plugin registers a `command` auth method on the `anthropic` integration. OpenCode runs `node src/login.mjs` and
-   saves its standard output as the key.
-2. `login.mjs` starts a callback server on `localhost:53693`, opens `platform.claude.com/oauth/authorize` (PKCE,
-   scope `org:create_api_key user:profile`) and exchanges the code for an OAuth token.
-3. It calls Anthropic's `create_api_key` endpoint with that token and prints the new API key.
-4. The login process includes retry logic for rate-limited responses (429, 529) with exponential backoff and
-   `retry-after` header support.
+1. The plugin registers an OAuth method (`console`) on the `anthropic` integration. `/connect` shows the sign-in URL
+   and waits for the browser to finish (`mode: "auto"`).
+2. `beginLogin` in `src/oauth.ts` starts a callback server on `localhost:53693`, uses PKCE with scope
+   `org:create_api_key user:profile`, and exchanges the code for an OAuth token.
+3. It calls Anthropic's `create_api_key` endpoint with that token. The minted Console API key is stored in the
+   credential's `metadata.apiKey`, next to the OAuth access and refresh tokens.
+4. An AI SDK hook (`src/provider.ts`) wraps `fetch` for the `anthropic` provider. Each request gets `x-api-key` set to
+   the Console key, plus the identity headers, and any `authorization` header is dropped.
+5. When the OAuth token is about to expire, the plugin refreshes it and mints a fresh key. A `401` triggers one
+   re-mint and one retry (not for streaming request bodies, which cannot be replayed).
 
-The key does not expire, so there is no refresh flow and no sync script. The OAuth token is used once and discarded.
-Requests go to `api.anthropic.com` with the key and are billed to the key's Console workspace.
+Refreshed or re-minted credentials are kept in memory only, because the plugin API has no call to persist them.
+After a restart OpenCode loads the stored credential again, and the plugin refreshes it again when needed. If the
+refresh fails, the connection is marked `needs_auth`; run `/connect` and sign in again.
 
 ## Rate limiting
 
-If you hit rate limits during login, the plugin automatically retries with exponential backoff. The retry window caps
-at 30 seconds by default—if the server signals a longer delay (indicating a quota/usage limit reset hours away), the
-error surfaces immediately so the process doesn't hang.
+Requests answered with `429` or `529` are retried according to `retry-after` (seconds or an HTTP date), up to
+`OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` (default 30000 ms). If the server asks for a longer wait, the response is returned
+unchanged so the error surfaces instead of the session hanging.
 
-Override with `OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS` if you need a longer retry window:
+Keys from one organization share a single quota. Retrying, or minting a new key, cannot get around an
+organization-wide limit; the plugin only waits out short limits.
 
 ```bash
 export OPENCODE_CLAUDE_AUTH_MAX_RETRY_MS=60000  # 60 seconds
-opencode /connect
 ```
+
+## Known limitation
+
+The hook sets `options.fetch` on the AI SDK provider options. That this is honoured is based on the type definitions
+of `@opencode/plugin` 2.2.1 and has not been confirmed against a running OpenCode.
 
 ## Notes
 
 - Port `53693` must be free during login.
 - The sign-in uses Claude Code's OAuth client ID, so the Console consent screen looks like Claude Code's.
 - Each `/connect` login saves a new account. Remove old ones with `/connect` or `opencode auth`; don't edit the database.
-- Needs `node` on `PATH` and Node 20 or newer.
+- Needs Node 20 or newer.
 
 ## Develop
 

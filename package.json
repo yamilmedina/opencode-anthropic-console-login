@@ -17,6 +17,6 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@opencode/plugin": "latest"
+    "@opencode/plugin": "^2.2.1"
   }
 }
