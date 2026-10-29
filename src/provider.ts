@@ -10,7 +10,7 @@
  * refreshed credential. The refreshed credential is kept in memory for the process, and a failed
  * refresh is reported through `integration.connection.status` ("needs_auth").
  */
-import type { Context } from "@opencode/plugin"
+import type { Plugin } from "@opencode/plugin"
 import { apiKeyOf, isExpiring, mintKey, refreshCredential, type OAuthCredential } from "./credentials.ts"
 import { describeRateLimit, fetchWithRetry } from "./http.ts"
 import { log } from "./logger.ts"
@@ -61,7 +61,7 @@ export function createConsoleFetch(
   }
 }
 
-export async function registerConsoleRequests(ctx: Pick<Context, "aisdk" | "integration">): Promise<void> {
+export async function registerConsoleRequests(ctx: Pick<Plugin.Context, "aisdk" | "integration">): Promise<void> {
   // The store keeps returning the original credential, so remember the refreshed one until the user reconnects.
   let origin: OAuthCredential | undefined
   let current: OAuthCredential | undefined
