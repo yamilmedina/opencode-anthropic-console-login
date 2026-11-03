@@ -1,5 +1,6 @@
 import { oauthFetch } from "./oauth-transport.ts"
-// Ported from https://github.com/jvortmann/pi-anthropic-console-login (MIT).
+// OAuth flow reference: https://github.com/jvortmann/pi-anthropic-console-login (MIT).
+// See LICENSE for copyright notices.
 import { spawn } from "node:child_process"
 import { createServer } from "node:http"
 import { fetchWithRetry } from "./http.ts"
@@ -80,7 +81,7 @@ export async function exchangeTokens({
   redirectUri: string
   fetchFn?: typeof fetch
 }): Promise<TokenResponse> {
-  // Authorization codes are single-use; match Pi by exchanging each code once.
+  // Authorization codes are single-use; do not retry the token exchange.
   const response = await fetchFn(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -139,7 +139,7 @@ test("callback port is fixed so the redirect URI stays registered", () => {
   assert.equal(CALLBACK_PORT, 53693)
 })
 
-test("a rate-limited authorization code is exchanged once, matching Pi", async () => {
+test("a rate-limited authorization code is exchanged once", async () => {
   let calls = 0
   const fetchFn = async () => {
     calls++

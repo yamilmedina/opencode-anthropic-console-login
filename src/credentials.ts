@@ -63,9 +63,9 @@ export async function refreshCredential(
 }
 
 /**
- * OpenCode calls this shortly before `expires` and stores the result, so it is the only
- * place rotated tokens and a new key persist. Like Pi, mint a fresh key with each refresh.
- * A failure keeps whatever still works: an existing key, or the rotated tokens.
+ * OpenCode stores the credentials returned by this refresh callback.
+ * Renew the tokens, then create a fresh API key. If token refresh fails, keep an
+ * existing key. If key creation fails, keep the rotated tokens and the existing key.
  */
 export async function renewCredential(
   cred: OAuthCredential,

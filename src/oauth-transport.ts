@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process"
 
-// Keep OAuth on Node's fetch/TLS stack, as used by Pi. Secrets travel over stdin,
+// Under Bun, send OAuth requests through a Node.js process. Secrets travel over stdin,
 // never command-line arguments or logs. Model requests stay on OpenCode's transport.
 const SCRIPT = `
 let input = "";

@@ -56,7 +56,7 @@ async function setup(initial = cred(), network) {
   } }
 }
 
-test("native requests authenticate with the Console key and preserve the payload", async () => {
+test("native requests use the Console key and prepend the identity block", async () => {
   const app = await setup()
   const event = await app.request()
   assert.equal(event.request.headers.get("x-api-key"), "sk-ant-console")

@@ -1,5 +1,4 @@
-// Pi prepends this block to the system prompt. Unlike Pi, omit cache_control:
-// OpenCode already uses Anthropic's limit of 4 cache_control blocks.
+// Prepend the identity without adding cache_control. Preserve existing cache markers.
 const IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 export function withClaudeCodeIdentity(body: string): string {
