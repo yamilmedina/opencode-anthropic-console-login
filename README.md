@@ -104,12 +104,6 @@ It sets `x-api-key` on HTTPS requests to `api.anthropic.com` and removes the OAu
 `authorization` header. Other providers, endpoints, and authentication methods pass
 through unchanged.
 
-The plugin prepends the Claude Code identity block
-(`You are Claude Code, Anthropic's official CLI for Claude.`) to the system prompt of
-`/v1/messages` requests. SDK headers, tool names, and streaming responses are preserved.
-The plugin supplies an API version and user agent only when absent. It adds no session
-or browser-access headers.
-
 ## Credentials and refresh
 
 The Console login stores an OAuth access token, a refresh token, and an API key in

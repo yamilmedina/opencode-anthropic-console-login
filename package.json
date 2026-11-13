@@ -5,18 +5,32 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
   },
   "files": [
     "src"
   ],
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=22.18.0"
   },
-  "dependencies": {
+  "peerDependencies": {
     "@opencode/plugin": "^2.2.1"
-  }
+  },
+  "devDependencies": {
+    "@opencode/plugin": "^2.2.1"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "anthropic",
+    "console",
+    "oauth"
+  ]
 }
